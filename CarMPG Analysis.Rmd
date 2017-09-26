@@ -1,0 +1,168 @@
+---
+title: "Precision of Your Car's Reported MPG with Bayesian Inference"
+output: html_notebook
+---
+
+A good friend of mine works for a car dealership, and although I had always joked about buying a car from him someday, that day finally arrived in 2015. My 2003 orange Honda Element (known by friends as "The Uglement"... sort of rolls off the tongue) was on its last legs. The struts and suspension were shot, engine clicking and struggling to turn over, and the body and interior were  worse for wear after  over a decade of fieldwork (I once transported an adult sea turtle in the car, which took up the entire trunk and backseat). I had been saving for a new car since acquiring The Uglement, and so, somewhat reluctantly, I decided it was time to zero-out the fund.
+
+I was living in Maine at the time, so a Subaru Outback seemed like the appropriate choice to blend in among the locals (also, I had considered one before purchasing the Element). Conveniently enough, my aformentioned friend worked with a Subaru dealership, and so I took a train down to Virginia, and drove home in the most Uglement looking 2016 Subaru Outback I could find.
+
+![Element vs Outback](/Users/scottmorello/Dropbox/Archives/Personal/Random Analysis/Random_Personal_Work/elementsubaru.jpg)
+
+As with most newer cars, my Outback has an integrated display showing real-time, and trip averaged, Miles Per Gallon (MPG). For my first few weeks with the new car (now known as "Ruby"), I entertained myself with the MPG readout by trying to be as fuel efficient as possible. As with any predicted estimate though... I thought the MPG readout required some validation.
+
+In October of 2015, only a few weeks after buying the new car, I began gathering my own MPG data for the car with the following procedure:
+
+
+1) Fill the gas tank. Use the automatic stop on the gas nozzle to determine when the tank is full.
+
+2) Reset the trip odometer in the Subaru. The car can calculate the MPG for a specific trip, so I can directly relate the miles traveled to a 2016 Subaru Outback calculated MPG estimate.
+
+3) Drive!
+
+4) Before filling up the gas tank again, write down miles traveled on the trip and estimated MPG from the odometer and dashboard display.
+
+5) Fill the gas tank, again using the automatic stop on the gas nozzle to determine when the tank is full. Write down how many gallons filled the tank (and hence were used since the last fill up).
+
+6) Reset the trip odomoeter and MPG display
+
+7) Go back to step 2
+
+
+These data (Date, Miles traveled, Gallons used, Actual MPG (calculated from the last two values), and Computer MPG) are displayed below (the first few lines at least).
+
+```{r, message=FALSE, warning=FALSE}
+#Import the data from a .csv file
+mpg.dat<-read.csv("/Users/scottmorello/Dropbox/Archives/Personal/Other/Car MPG Data.csv")
+
+#Look at the first few lines
+head(mpg.dat)
+```
+
+The next step is to look at the relationship between Computer estimated and Actual MPG. We can use linear regression for this, but first we take a quick look at how well correlated the data are, to which of course the answer is "very well".
+```{r, message=FALSE, warning=FALSE}
+cor(mpg.dat$Computer.MPG,mpg.dat$Actual.MPG)
+```
+
+Now, we could use a simple linear regression ('lm' function), but what we really want to understand is the variation around the regression parameters - specifically the y intercept ('a' in the equation 'y=a+bx'), which will tell us the deviation between computer predicted and actual MPG if we constrain the slope ('b' in the afformentioned equation) to '1' (so, just assuming the relationship between computer and actual MPG is 1 to 1). This presents a good opportunity to use a Bayesian method with the package 'rjags'.
+
+So we fit the following model:
+
+yiâ¼N(Î¼i,Ï)     
+Î¼i=Î²+1*xi     
+Î²â¼N(0,0.001)     
+Ï=1/(Ï^2)     
+Ïâ¼U(0,100)
+
+We construct this model, and run it for 1000 iterations on each of 3 chains using JAGS (Just Another Gibs Samopler... equivalent to WinBugs language).
+```{r, message=FALSE, warning=FALSE,results="hide"}
+library(rjags)
+library(coda)
+
+
+mpg.mod="
+model {
+   #Likelihood part of the model
+   for (i in 1:n) { # itterate over each point
+      y[i]~dnorm(mu[i],tau) #tau is precision (1 / variance)
+      mu[i] <- beta+1*x[i] #linear relation constrained to a slope of 1,
+                           #so only the intercept is allowed to vary
+   }
+
+   #Speciy your priors
+   beta ~ dnorm(0,0.001) # intercept normally distributed
+   tau <- 1 / (sigma * sigma) # variance as the squared standed deviation
+   sigma~dunif(0,100) # standard deviation based on a uniform prior
+}"
+
+mpg.jagsmodel <- jags.model(textConnection(mpg.mod), # call the model
+                   data = list('y' = mpg.dat$Actual.MPG,
+                               'x' = mpg.dat$Computer.MPG,
+                               'n' = length(mpg.dat$Computer.MPG)
+                              ),
+                   n.chains = 3, #how many parallel chains to run
+                   n.adapt = 100) # How many samples should be thrown away as part of the 
+                                  # adaptive sampling period of the chain
+
+update(mpg.jagsmodel, 1000) # run the model another 1000 itterations as a burn in
+
+mpg.jagsmodel.samples<-coda.samples(mpg.jagsmodel, # now take this simulation run
+             c('beta'), # sample these variables
+             1000) # take this many samples
+
+```
+We can visualize the Priors for alpha and sigma.
+```{r, message=FALSE, warning=FALSE}
+#Prior for beta (Î²)
+plot(c(seq(-1,1,.0001)),dnorm(seq(-1,1,.0001),0,0.001))
+#Prior for sigma (Ï)
+plot(c(seq(0,200,1)),dunif(seq(0,200,1),0,100))
+```
+
+Now, looking at the model, we find that the intercept (beta, Î²) is negative, and the uncertainty around it does not cross 0
+```{r}
+summary(mpg.jagsmodel.samples)
+```
+
+The same can be seen by plotting the MCMC progression and density of beta (Î²) for one of our 3 chains from the analysis (we can also see the MCMC is pretty stable).
+```{r, message=FALSE, warning=FALSE}
+plot(mpg.jagsmodel.samples[[1]][,c("beta")])
+```
+
+
+Visualizing the output as a regression, we see the fit (red, solid) and 95% credible intervals around the fit (red, dashed) fall at least 1 MPG outside of a 1:1 relationship between Computer predicted MPG and Actual MPG with an intercept of 0 (blue, solid).
+```{r, message=FALSE, warning=FALSE}
+library(ggplot2)
+quants<-summary(mpg.jagsmodel.samples)$quantiles
+
+ggplot(data=mpg.dat,aes(y=Actual.MPG, x=Computer.MPG))+
+geom_point()+
+geom_abline(slope=1,intercept=quants[3],cex=.5,colour='red')+
+geom_abline(slope=1,intercept=quants[1],cex=.5,colour='red',lty='dashed')+
+geom_abline(slope=1,intercept=quants[5],cex=.5,colour='red',lty='dashed')+
+geom_abline(slope=1,intercept=0,cex=.5,colour='blue')+
+scale_x_continuous(name="Computer Predicted MPG",limits=c(min(c(mpg.dat$Actual.MPG,mpg.dat$Computer.MPGt)),max(c(mpg.dat$Actual.MPG,mpg.dat$Computer.MPG))))+
+scale_y_continuous(name="Actual MPG",limits=c(min(c(mpg.dat$Actual.MPG,mpg.dat$Computer.MPG)),max(c(mpg.dat$Actual.MPG,mpg.dat$Computer.MPG))))+
+  coord_fixed()+
+theme_bw()
+
+```
+
+All in all, my Outback's Computer predicts MPG pretty well. Even if I let the slope vary in the linear regression, slope (beta 2) comes out very close to 1, although now the 95% credibility intervals (2.5%-97.5% quantiles) of the y-intercept  overlap with 0. This suggests that the relationship between Computer reported and Actual MPG (slope) is pretty direct (~1:1, as it should be), and that allowing for computer error in the precision of this relationship  accounts for some portion of the computers overall deviation from actual car MPG (the y intercept).
+
+```{r, message=FALSE, warning=FALSE,results="hide"}
+
+mpg.mod2="
+model {
+   for (i in 1:n) { 
+      y[i]~dnorm(mu[i],tau) 
+      mu[i] <- beta1+beta2*x[i] 
+   }
+
+
+   beta1 ~ dnorm(0,0.001) # intercept normally distributed
+   beta2 ~ dnorm(1,0.001) # intercept normally distributed
+   tau <- 1 / (sigma * sigma) # variance as the squared standed deviation
+   sigma~dunif(0,100) # standard deviation based on a uniform prior
+}"
+
+mpg.jagsmodel2 <- jags.model(textConnection(mpg.mod2), # call the model
+                   data = list('y' = mpg.dat$Actual.MPG,
+                               'x' = mpg.dat$Computer.MPG,
+                               'n' = length(mpg.dat$Computer.MPG)
+                              ),
+                   n.chains = 3, 
+                   n.adapt = 100) 
+
+update(mpg.jagsmodel2, 1000) 
+
+mpg.jagsmodel2.samples<-coda.samples(mpg.jagsmodel2,c('beta1','beta2'), 1000)
+
+```
+```{r, message=FALSE, warning=FALSE}
+summary(mpg.jagsmodel2.samples)
+```
+
+ Even allowing that slope to vary however, the majority of the y-intercept's 95% credibility intervals fall < 0, and extremely few points fall on or above the 1:1 line (above: blue, solid). This all seems a bit too convenient, especially considering the marketing benefit of a seemingly higher MPG vehicle. In the end though, the computer readout of MPG is mostly within 1 MPG of the actual, and I imagine there is some fine print somewhere in the user manual that disclaims the potential inaccuracy. Also, I get FAR more MPG in my 2016 Subaru Outback than I did in the Uglement (RIP you orange beauty... she was scrapped), I now have a real-time readout of MPG performance to tailor my driving to, and the Outback performs fantastically in inclement weather. I recommend the car to anyone who asks... but I do disclaim 1 MPG overestimation of the readout... even if my analysis was on a sample size of 1 car.
+
+
